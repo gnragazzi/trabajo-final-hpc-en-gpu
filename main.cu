@@ -51,13 +51,13 @@ PixelU8 *copiar_data(const PixelU8 *, int);
 
 Imagen leer_imagen(const char *);
 
-unsigned char *detectar_bordes(const Imagen &);
+unsigned char *detectar_bordes(const PixelU8 *entrada, unsigned char *salida, int size);
 
 void filtrar(Imagen *);
 
 void resaltar(const Imagen *);
 
-unsigned char *umbralizar(const Imagen *);
+__global__ void umbralizar(PixelU8 *entrada, unsigned char *salida, int size);
 
 void pasar_a_gris(const Imagen *);
 
@@ -72,7 +72,7 @@ short normalizar_valor(short valor);
 
 double **construir_mascara_filtrado(int size);
 
-void posterizar(PixelU8 *entrada, PixelU8 *salida, int size);
+__global__ void posterizar(PixelU8 *entrada, PixelU8 *salida, int size);
 
 short posterizar_valor(short valor);
 
@@ -94,15 +94,19 @@ int main(const int argc, char **argv) {
 
     iniciar_etapa();
     const Imagen imagen_original = leer_imagen(config.path_imagen);
-    PixelU8 *data_imagen_original_device, PixelU8 *data_posterizada_device;
+    PixelU8 *data_imagen_original_device, *data_posterizada_device, *data_detectar_bordes_device;
+    unsigned char *mascara_bordes_device;
 
     cudaMalloc((void **) &data_imagen_original_device, sizeof(PixelU8) * imagen_original.size);
     cudaMalloc((void **) &data_posterizada_device, sizeof(PixelU8) * imagen_original.size);
-    cudaMemcpy((void *)data_imagen_original_device, imagen_original.data, sizeof(PixelU8) * imagen_original.size, cudaMemcpyHostToDevice);
+    cudaMalloc((void **) &data_detectar_bordes_device, sizeof(PixelU8) * imagen_original.size);
+    cudaMalloc((void **) &mascara_bordes_device, sizeof(unsigned char) * imagen_original.size);
+    cudaMemcpy(data_imagen_original_device, imagen_original.data, sizeof(PixelU8) * imagen_original.size, cudaMemcpyHostToDevice);
+    cudaMemcpy(data_detectar_bordes_device, imagen_original.data, sizeof(PixelU8) * imagen_original.size, cudaMemcpyHostToDevice);
 
     log_tiempo_etapa("[Leyendo Imagen]");
 
-    unsigned char *mascara_bordes = detectar_bordes(imagen_original);
+    detectar_bordes(data_detectar_bordes_device, mascara_bordes_device, imagen_original.size);
 
     iniciar_etapa();
     posterizar<<<M,N>>>(data_imagen_original_device, data_posterizada_device, imagen_original.size);
@@ -115,7 +119,9 @@ int main(const int argc, char **argv) {
     guardar_imagen(resultado, config.path_imagen);
 
     free(imagen_original.data);
-    cudaFree((void *)data_imagen_original_device);
+    cudaFree(data_imagen_original_device);
+    cudaFree(data_posterizada_device);
+    cudaFree(data_detectar_bordes_device);
     free(mascara_bordes);
     free(resultado.data);
     log_tiempo_etapa("[Guardando Imagen]");
@@ -251,20 +257,13 @@ __global__ void posterizar(const PixelU8 *entrada, PixelU8 *salida, const int si
 
 }
 
-unsigned char *detectar_bordes(const Imagen &imagen) {
-    Imagen copia = imagen;
-    copia.data = copiar_data(imagen.data, imagen.size);
-
+unsigned char *detectar_bordes(PixelU8 *entrada, unsigned char *salida, int size){
     log_tiempo_etapa("[Detección de Bordes] Filtrado");
-    filtrar(&copia);
+    filtrar(entrada);
     log_tiempo_etapa("[Detección de Bordes] Resaltado");
-    resaltar(&copia);
+    resaltar(entrada);
     log_tiempo_etapa("[Detección de Bordes] Umbralizado");
-    unsigned char *mascara = umbralizar(&copia);
-
-    free(copia.data);
-
-    return mascara;
+    umbralizar<<<M,N>>>(entrada, salida, size);
 }
 
 void filtrar(Imagen *imagen) {
@@ -441,14 +440,13 @@ double **construir_mascara_sobel(enum tipo_sobel tipo) {
     return mascara;
 }
 
-unsigned char *umbralizar(const Imagen *imagen) {
-    unsigned char *mascara = (unsigned char *) asignar_memoria(imagen->size, sizeof(unsigned char));
+__global__ void umbralizar(PixelU8 *entrada, unsigned char *salida, int size) {
+    const unsigned int thread_id_global = blockDim.x * blockIdx.x + threadIdx.x;
+    const unsigned int cantidad_threads = gridDim.x * blockDim.x;
 
-    for (int i = 0; i < imagen->size; i++) {
-        mascara[i] = imagen->data[i].r < config.umbral ? 0 : 1;
+    for (int i = thread_id_global; i < size; i+=cantidad_threads) {
+        salida[i] = entrada[i].r < config.umbral ? 0 : 1;
     }
-
-    return mascara;
 }
 
 __host__ __device__ short posterizar_valor(const short valor) {
