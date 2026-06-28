@@ -51,15 +51,15 @@ PixelU8 *copiar_data(const PixelU8 *, int);
 
 Imagen leer_imagen(const char *);
 
-unsigned char *detectar_bordes(const PixelU8 *entrada, unsigned char *salida, int size);
+void detectar_bordes(const PixelU8 *entrada, unsigned char *salida, int size);
 
 void filtrar(Imagen *);
 
-void resaltar(const Imagen *);
+void resaltar(PixelU8 *data, int size);
 
 __global__ void umbralizar(PixelU8 *entrada, unsigned char *salida, int size);
 
-void pasar_a_gris(const Imagen *);
+void pasar_a_gris(PixelU8 *data, int size);
 
 void aplicar_operador_gradiente(const Imagen *);
 
@@ -72,7 +72,7 @@ short normalizar_valor(short valor);
 
 double **construir_mascara_filtrado(int size);
 
-__global__ void posterizar(PixelU8 *entrada, PixelU8 *salida, int size);
+__global__ void posterizar(PixelU8 *salida, int size);
 
 short posterizar_valor(short valor);
 
@@ -80,6 +80,8 @@ __global__ void unir_imagenes(const unsigned char *mascara, const PixelU8 *data_
                               int size);
 
 void guardar_imagen(const Imagen &, char *);
+
+void construir_resultado(Imagen imagen_original, Imagen &resultado, PixelU8 *data_resultado);
 
 int main(const int argc, char **argv) {
     clock_gettime(CLOCK_MONOTONIC, &inicio_global);
@@ -96,16 +98,15 @@ int main(const int argc, char **argv) {
     iniciar_etapa();
     const Imagen imagen_original = leer_imagen(config.path_imagen);
     Imagen resultado;
-    PixelU8 *data_imagen_original_device, *data_posterizada_device, *data_detectar_bordes_device, *data_resultado;
+    PixelU8 *data_posterizada_device, *data_detectar_bordes_device, *data_resultado;
     unsigned char *mascara_bordes_device;
 
-    cudaMalloc((void **) &data_imagen_original_device, sizeof(PixelU8) * imagen_original.size);
     cudaMalloc((void **) &data_posterizada_device, sizeof(PixelU8) * imagen_original.size);
     cudaMalloc((void **) &data_detectar_bordes_device, sizeof(PixelU8) * imagen_original.size);
     cudaMalloc((void **) &data_resultado, sizeof(PixelU8) * imagen_original.size);
     cudaMalloc((void **) &mascara_bordes_device, sizeof(unsigned char) * imagen_original.size);
 
-    cudaMemcpy(data_imagen_original_device, imagen_original.data, sizeof(PixelU8) * imagen_original.size,
+    cudaMemcpy(data_posterizada_device, imagen_original.data, sizeof(PixelU8) * imagen_original.size,
                cudaMemcpyHostToDevice);
     cudaMemcpy(data_detectar_bordes_device, imagen_original.data, sizeof(PixelU8) * imagen_original.size,
                cudaMemcpyHostToDevice);
@@ -115,7 +116,7 @@ int main(const int argc, char **argv) {
     detectar_bordes(data_detectar_bordes_device, mascara_bordes_device, imagen_original.size);
 
     iniciar_etapa();
-    posterizar<<<M,N>>>(data_imagen_original_device, data_posterizada_device, imagen_original.size);
+    posterizar<<<M,N>>>(data_posterizada_device, imagen_original.size);
 
     log_tiempo_etapa("[Posterizando Imagen]");
     unir_imagenes<<<M, N>>>(mascara_bordes_device, data_posterizada_device, data_resultado, imagen_original.size);
@@ -123,17 +124,11 @@ int main(const int argc, char **argv) {
 
     iniciar_etapa();
 
-    resultado.size = imagen_original.size;
-    resultado.alto = imagen_original.alto;
-    resultado.ancho = imagen_original.ancho;
-    resultado.data = (PixelU8 *) asignar_memoria(resultado.size, sizeof(PixelU8));
-
-    cudaMemcpy(resultado.data, data_resultado, resultado.size, cudaMemcpyDeviceToHost);
+    construir_resultado(imagen_original, resultado, data_resultado);
     guardar_imagen(resultado, config.path_imagen);
 
     free(imagen_original.data);
     free(resultado.data);
-    cudaFree(data_imagen_original_device);
     cudaFree(data_posterizada_device);
     cudaFree(data_detectar_bordes_device);
     cudaFree(mascara_bordes_device);
@@ -260,22 +255,31 @@ void guardar_imagen(const Imagen &imagen, char *path) {
     free((void *) data);
 }
 
-__global__ void posterizar(const PixelU8 *entrada, PixelU8 *salida, const int size) {
+void construir_resultado(const Imagen imagen_original, Imagen &resultado, PixelU8 *data_resultado) {
+    resultado.size = imagen_original.size;
+    resultado.alto = imagen_original.alto;
+    resultado.ancho = imagen_original.ancho;
+    resultado.data = (PixelU8 *) asignar_memoria(resultado.size, sizeof(PixelU8));
+
+    cudaMemcpy(resultado.data, data_resultado, resultado.size, cudaMemcpyDeviceToHost);
+}
+
+__global__ void posterizar(PixelU8 *salida, const int size) {
     const unsigned int thread_id_global = blockDim.x * blockIdx.x + threadIdx.x;
     const unsigned int cantidad_threads = gridDim.x * blockDim.x;
 
     for (int i = thread_id_global; i < size; i += cantidad_threads) {
-        salida[i].r = (unsigned char) posterizar_valor(entrada[i].r);
-        salida[i].g = (unsigned char) posterizar_valor(entrada[i].g);
-        salida[i].b = (unsigned char) posterizar_valor(entrada[i].b);
+        salida[i].r = (unsigned char) posterizar_valor(salida[i].r);
+        salida[i].g = (unsigned char) posterizar_valor(salida[i].g);
+        salida[i].b = (unsigned char) posterizar_valor(salida[i].b);
     }
 }
 
-unsigned char *detectar_bordes(PixelU8 *entrada, unsigned char *salida, int size) {
+void detectar_bordes(PixelU8 *entrada, unsigned char *salida, const int size) {
     log_tiempo_etapa("[Detección de Bordes] Filtrado");
     filtrar(entrada);
     log_tiempo_etapa("[Detección de Bordes] Resaltado");
-    resaltar(entrada);
+    resaltar(entrada, size);
     log_tiempo_etapa("[Detección de Bordes] Umbralizado");
     umbralizar<<<M,N>>>(entrada, salida, size);
 }
@@ -376,18 +380,20 @@ short normalizar_valor(const short valor) {
     return valor;
 }
 
-void resaltar(const Imagen *imagen) {
-    pasar_a_gris(imagen);
+void resaltar(PixelU8 *data, const int size) {
+    pasar_a_gris<<<M,N>>>(data, size);
     aplicar_operador_gradiente(imagen);
 }
 
-void pasar_a_gris(const Imagen *imagen) {
-    for (int i = 0; i < imagen->size; i++) {
-        const unsigned char nuevo_valor =
-                (unsigned char) (0.3 * imagen->data[i].r + 0.59 * imagen->data[i].g + 0.11 * imagen->data[i].b);
-        imagen->data[i].r = nuevo_valor;
-        imagen->data[i].g = nuevo_valor;
-        imagen->data[i].b = nuevo_valor;
+void pasar_a_gris(PixelU8 *data, const int size) {
+    const unsigned int thread_id_global = blockDim.x * blockIdx.x + threadIdx.x;
+    const unsigned int cantidad_threads = gridDim.x * blockDim.x;
+
+    for (int i = thread_id_global; i < size; i += cantidad_threads) {
+        const unsigned char nuevo_valor = (unsigned char) (0.3 * data[i].r + 0.59 * data[i].g + 0.11 * data[i].b);
+        data[i].r = nuevo_valor;
+        data[i].g = nuevo_valor;
+        data[i].b = nuevo_valor;
     }
 }
 
