@@ -76,7 +76,8 @@ __global__ void posterizar(PixelU8 *entrada, PixelU8 *salida, int size);
 
 short posterizar_valor(short valor);
 
-Imagen unir_imagenes(const unsigned char *, const Imagen &);
+__global__ void unir_imagenes(const unsigned char *mascara, const PixelU8 *data_posterizada, PixelU8 *resultado,
+                              int size);
 
 void guardar_imagen(const Imagen &, char *);
 
@@ -94,15 +95,20 @@ int main(const int argc, char **argv) {
 
     iniciar_etapa();
     const Imagen imagen_original = leer_imagen(config.path_imagen);
-    PixelU8 *data_imagen_original_device, *data_posterizada_device, *data_detectar_bordes_device;
+    Imagen resultado;
+    PixelU8 *data_imagen_original_device, *data_posterizada_device, *data_detectar_bordes_device, *data_resultado;
     unsigned char *mascara_bordes_device;
 
     cudaMalloc((void **) &data_imagen_original_device, sizeof(PixelU8) * imagen_original.size);
     cudaMalloc((void **) &data_posterizada_device, sizeof(PixelU8) * imagen_original.size);
     cudaMalloc((void **) &data_detectar_bordes_device, sizeof(PixelU8) * imagen_original.size);
+    cudaMalloc((void **) &data_resultado, sizeof(PixelU8) * imagen_original.size);
     cudaMalloc((void **) &mascara_bordes_device, sizeof(unsigned char) * imagen_original.size);
-    cudaMemcpy(data_imagen_original_device, imagen_original.data, sizeof(PixelU8) * imagen_original.size, cudaMemcpyHostToDevice);
-    cudaMemcpy(data_detectar_bordes_device, imagen_original.data, sizeof(PixelU8) * imagen_original.size, cudaMemcpyHostToDevice);
+
+    cudaMemcpy(data_imagen_original_device, imagen_original.data, sizeof(PixelU8) * imagen_original.size,
+               cudaMemcpyHostToDevice);
+    cudaMemcpy(data_detectar_bordes_device, imagen_original.data, sizeof(PixelU8) * imagen_original.size,
+               cudaMemcpyHostToDevice);
 
     log_tiempo_etapa("[Leyendo Imagen]");
 
@@ -112,21 +118,30 @@ int main(const int argc, char **argv) {
     posterizar<<<M,N>>>(data_imagen_original_device, data_posterizada_device, imagen_original.size);
 
     log_tiempo_etapa("[Posterizando Imagen]");
-    const Imagen resultado = unir_imagenes(mascara_bordes, imagen_posterizada);
+    unir_imagenes<<<M, N>>>(mascara_bordes_device, data_posterizada_device, data_resultado, imagen_original.size);
     log_tiempo_etapa("[Uniendo Imágenes]");
 
     iniciar_etapa();
+
+    resultado.size = imagen_original.size;
+    resultado.alto = imagen_original.alto;
+    resultado.ancho = imagen_original.ancho;
+    resultado.data = (PixelU8 *) asignar_memoria(resultado.size, sizeof(PixelU8));
+
+    cudaMemcpy(resultado.data, data_resultado, resultado.size, cudaMemcpyDeviceToHost);
     guardar_imagen(resultado, config.path_imagen);
 
     free(imagen_original.data);
+    free(resultado.data);
     cudaFree(data_imagen_original_device);
     cudaFree(data_posterizada_device);
     cudaFree(data_detectar_bordes_device);
-    free(mascara_bordes);
-    free(resultado.data);
+    cudaFree(mascara_bordes_device);
+    cudaFree(data_resultado);
     log_tiempo_etapa("[Guardando Imagen]");
 
-    snprintf(buffer, sizeof(buffer), "Finalizando Ejecución. Imagen medida X: %d Y: %d", imagen_original.ancho, imagen_original.alto);
+    snprintf(buffer, sizeof(buffer), "Finalizando Ejecución. Imagen medida X: %d Y: %d", imagen_original.ancho,
+             imagen_original.alto);
 
     log_tiempo(buffer);
 
@@ -142,7 +157,7 @@ void log_tiempo_etapa(const char *etapa) {
     clock_gettime(CLOCK_MONOTONIC, &fin);
 
     const double elapsed = (fin.tv_sec - inicio_etapa.tv_sec) +
-                     (fin.tv_nsec - inicio_etapa.tv_nsec) / 1e9;
+                           (fin.tv_nsec - inicio_etapa.tv_nsec) / 1e9;
 
     printf("[TIEMPO ETAPA] %s: %.6f s\n", etapa, elapsed);
 }
@@ -172,7 +187,7 @@ void *asignar_memoria(int n, size_t size) {
 }
 
 PixelU8 *copiar_data(const PixelU8 *data, const int size) {
-    const auto copia = (PixelU8 *)asignar_memoria(size, sizeof(PixelU8));
+    const auto copia = (PixelU8 *) asignar_memoria(size, sizeof(PixelU8));
 
     for (int i = 0; i < size; i++) {
         copia[i].r = data[i].r;
@@ -249,15 +264,14 @@ __global__ void posterizar(const PixelU8 *entrada, PixelU8 *salida, const int si
     const unsigned int thread_id_global = blockDim.x * blockIdx.x + threadIdx.x;
     const unsigned int cantidad_threads = gridDim.x * blockDim.x;
 
-    for (int i = thread_id_global; i < size; i+=cantidad_threads) {
+    for (int i = thread_id_global; i < size; i += cantidad_threads) {
         salida[i].r = (unsigned char) posterizar_valor(entrada[i].r);
         salida[i].g = (unsigned char) posterizar_valor(entrada[i].g);
         salida[i].b = (unsigned char) posterizar_valor(entrada[i].b);
     }
-
 }
 
-unsigned char *detectar_bordes(PixelU8 *entrada, unsigned char *salida, int size){
+unsigned char *detectar_bordes(PixelU8 *entrada, unsigned char *salida, int size) {
     log_tiempo_etapa("[Detección de Bordes] Filtrado");
     filtrar(entrada);
     log_tiempo_etapa("[Detección de Bordes] Resaltado");
@@ -272,7 +286,7 @@ void filtrar(Imagen *imagen) {
 
     for (int i = 0; i < imagen->size; i++) {
         PixelS16 valor = aplicar_mascara(imagen, i, config.tamaño_mascara, máscara,
-                                          1.0 / (config.tamaño_mascara * config.tamaño_mascara));
+                                         1.0 / (config.tamaño_mascara * config.tamaño_mascara));
         data_blureada[i].r = (unsigned char) valor.r;
         data_blureada[i].g = (unsigned char) valor.g;
         data_blureada[i].b = (unsigned char) valor.b;
@@ -300,7 +314,7 @@ double **construir_mascara_filtrado(const int size) {
 }
 
 enum boolean pixel_fuera_de_limite(const int indice_pixel_actual, const int indice_pixel, const int offset_fila,
-                                const int ancho, const int size) {
+                                   const int ancho, const int size) {
     if (indice_pixel_actual < 0)
         return TRUE;
     if (indice_pixel_actual > (size - 1))
@@ -325,7 +339,7 @@ PixelS16 aplicar_mascara(const Imagen *imagen, const int indice_pixel, const int
             const int offset_columna = j - medio;
             const int indice_pixel_actual = indice_pixel + offset_columna + offset_fila;
             const enum boolean fuera = pixel_fuera_de_limite(indice_pixel_actual, indice_pixel, offset_fila,
-                                                           imagen->ancho, imagen->size);
+                                                             imagen->ancho, imagen->size);
 
             pixeles_enmascarados[i][j].r = fuera ? 0 : (short) (mascara[i][j] * imagen->data[indice_pixel_actual].r);
             pixeles_enmascarados[i][j].g = fuera ? 0 : (short) (mascara[i][j] * imagen->data[indice_pixel_actual].g);
@@ -370,7 +384,7 @@ void resaltar(const Imagen *imagen) {
 void pasar_a_gris(const Imagen *imagen) {
     for (int i = 0; i < imagen->size; i++) {
         const unsigned char nuevo_valor =
-            (unsigned char) (0.3 * imagen->data[i].r + 0.59 * imagen->data[i].g + 0.11 * imagen->data[i].b);
+                (unsigned char) (0.3 * imagen->data[i].r + 0.59 * imagen->data[i].g + 0.11 * imagen->data[i].b);
         imagen->data[i].r = nuevo_valor;
         imagen->data[i].g = nuevo_valor;
         imagen->data[i].b = nuevo_valor;
@@ -444,7 +458,7 @@ __global__ void umbralizar(PixelU8 *entrada, unsigned char *salida, int size) {
     const unsigned int thread_id_global = blockDim.x * blockIdx.x + threadIdx.x;
     const unsigned int cantidad_threads = gridDim.x * blockDim.x;
 
-    for (int i = thread_id_global; i < size; i+=cantidad_threads) {
+    for (int i = thread_id_global; i < size; i += cantidad_threads) {
         salida[i] = entrada[i].r < config.umbral ? 0 : 1;
     }
 }
@@ -458,22 +472,18 @@ __host__ __device__ short posterizar_valor(const short valor) {
     return rango * ancho_rango + offset_representativo;
 }
 
-Imagen unir_imagenes(const unsigned char *mascara, const Imagen &imagen_posterizada) {
-    Imagen suma;
-    suma.size = imagen_posterizada.size;
-    suma.ancho = imagen_posterizada.ancho;
-    suma.alto = imagen_posterizada.alto;
-    suma.data = (PixelU8 *) asignar_memoria(suma.size, sizeof(PixelU8));
+__global__ void unir_imagenes(const unsigned char *mascara, const PixelU8 *data_posterizada, PixelU8 *resultado,
+                              const int size) {
+    const unsigned int thread_id_global = blockDim.x * blockIdx.x + threadIdx.x;
+    const unsigned int cantidad_threads = gridDim.x * blockDim.x;
 
-    for (int i = 0; i < suma.size; i++) {
+    for (int i = thread_id_global; i < size; i += cantidad_threads) {
         if (mascara[i]) {
-            suma.data[i].r = 0;
-            suma.data[i].g = 0;
-            suma.data[i].b = 0;
+            resultado[i].r = 0;
+            resultado[i].g = 0;
+            resultado[i].b = 0;
         } else {
-            suma.data[i] = imagen_posterizada.data[i];
+            resultado[i] = data_posterizada[i];
         }
     }
-
-    return suma;
 }
