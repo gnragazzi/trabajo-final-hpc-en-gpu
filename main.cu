@@ -2,6 +2,8 @@
 #include <stdlib.h>
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #define STB_IMAGE_IMPLEMENTATION
+#define M 8
+#define N 128
 #include <stb_image.h>
 #include <stb_image_write.h>
 #include <time.h>
@@ -70,7 +72,7 @@ short normalizar_valor(short valor);
 
 double **construir_mascara_filtrado(int size);
 
-Imagen posterizar(Imagen);
+void posterizar(PixelU8 *entrada, PixelU8 *salida, int size);
 
 short posterizar_valor(short valor);
 
@@ -92,12 +94,18 @@ int main(const int argc, char **argv) {
 
     iniciar_etapa();
     const Imagen imagen_original = leer_imagen(config.path_imagen);
+    PixelU8 *data_imagen_original_device, PixelU8 *data_posterizada_device;
+
+    cudaMalloc((void **) &data_imagen_original_device, sizeof(PixelU8) * imagen_original.size);
+    cudaMalloc((void **) &data_posterizada_device, sizeof(PixelU8) * imagen_original.size);
+    cudaMemcpy((void *)data_imagen_original_device, imagen_original.data, sizeof(PixelU8) * imagen_original.size, cudaMemcpyHostToDevice);
+
     log_tiempo_etapa("[Leyendo Imagen]");
 
     unsigned char *mascara_bordes = detectar_bordes(imagen_original);
 
     iniciar_etapa();
-    const Imagen imagen_posterizada = posterizar(imagen_original);
+    posterizar<<<M,N>>>(data_imagen_original_device, data_posterizada_device, imagen_original.size);
 
     log_tiempo_etapa("[Posterizando Imagen]");
     const Imagen resultado = unir_imagenes(mascara_bordes, imagen_posterizada);
@@ -107,7 +115,7 @@ int main(const int argc, char **argv) {
     guardar_imagen(resultado, config.path_imagen);
 
     free(imagen_original.data);
-    free(imagen_posterizada.data);
+    cudaFree((void *)data_imagen_original_device);
     free(mascara_bordes);
     free(resultado.data);
     log_tiempo_etapa("[Guardando Imagen]");
@@ -231,16 +239,16 @@ void guardar_imagen(const Imagen &imagen, char *path) {
     free((void *) data);
 }
 
-Imagen posterizar(Imagen imagen) {
-    PixelU8 *data_posterizada = (PixelU8 *) asignar_memoria(imagen.size, sizeof(PixelU8));
-    for (int i = 0; i < imagen.size; i++) {
-        data_posterizada[i].r = (unsigned char) posterizar_valor(imagen.data[i].r);
-        data_posterizada[i].g = (unsigned char) posterizar_valor(imagen.data[i].g);
-        data_posterizada[i].b = (unsigned char) posterizar_valor(imagen.data[i].b);
-    }
-    imagen.data = data_posterizada;
+__global__ void posterizar(const PixelU8 *entrada, PixelU8 *salida, const int size) {
+    const unsigned int thread_id_global = blockDim.x * blockIdx.x + threadIdx.x;
+    const unsigned int cantidad_threads = gridDim.x * blockDim.x;
 
-    return imagen;
+    for (int i = thread_id_global; i < size; i+=cantidad_threads) {
+        salida[i].r = (unsigned char) posterizar_valor(entrada[i].r);
+        salida[i].g = (unsigned char) posterizar_valor(entrada[i].g);
+        salida[i].b = (unsigned char) posterizar_valor(entrada[i].b);
+    }
+
 }
 
 unsigned char *detectar_bordes(const Imagen &imagen) {
@@ -443,7 +451,7 @@ unsigned char *umbralizar(const Imagen *imagen) {
     return mascara;
 }
 
-short posterizar_valor(const short valor) {
+__host__ __device__ short posterizar_valor(const short valor) {
     const short ancho_rango = config.valor_max_rgb / config.rango_posterizado;
     const short offset_representativo = ancho_rango / 2;
     short rango = valor / ancho_rango;
