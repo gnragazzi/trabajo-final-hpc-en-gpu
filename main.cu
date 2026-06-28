@@ -47,41 +47,38 @@ void error(const char *msj);
 
 void *asignar_memoria(int, size_t);
 
-PixelU8 *copiar_data(const PixelU8 *, int);
-
 Imagen leer_imagen(const char *);
 
-void detectar_bordes(const PixelU8 *entrada, unsigned char *salida, int size);
+void detectar_bordes(const PixelU8 *entrada, unsigned char *salida, int size, int ancho);
 
 void filtrar(Imagen *);
 
-void resaltar(PixelU8 *data, int size);
+void resaltar(PixelU8 *data, int size, int ancho);
 
 __global__ void umbralizar(PixelU8 *entrada, unsigned char *salida, int size);
 
-void pasar_a_gris(PixelU8 *data, int size);
+__global__ void pasar_a_gris(PixelU8 *data, int size);
 
-void aplicar_operador_gradiente(const Imagen *);
+__global__ void aplicar_operador_gradiente(PixelU8 *data, PixelS16 *data_sobel_horizontal, PixelS16 *data_sobel_vertical, double **mascara_sobel_horizontal, double **mascara_sobel_vertical, int size, int ancho);
 
 double **construir_mascara_sobel(enum tipo_sobel);
 
-PixelS16 aplicar_mascara(const Imagen *imagen, int indice_pixel, int tamaño_máscara, double **mascara,
-                         double factor_normalización);
+PixelS16 aplicar_mascara(const PixelU8 *data, int indice_pixel, int tamaño_máscara, double **mascara, double factor_normalización, int ancho, int size);
 
-short normalizar_valor(short valor);
+__host__ __device__ short normalizar_valor(short valor);
 
 double **construir_mascara_filtrado(int size);
 
 __global__ void posterizar(PixelU8 *salida, int size);
 
-short posterizar_valor(short valor);
+__host__ __device__ short posterizar_valor(short valor);
 
 __global__ void unir_imagenes(const unsigned char *mascara, const PixelU8 *data_posterizada, PixelU8 *resultado,
                               int size);
 
 void guardar_imagen(const Imagen &, char *);
 
-void construir_resultado(Imagen imagen_original, Imagen &resultado, PixelU8 *data_resultado);
+__host__ void construir_resultado(Imagen imagen_original, Imagen &resultado, PixelU8 *data_resultado);
 
 int main(const int argc, char **argv) {
     clock_gettime(CLOCK_MONOTONIC, &inicio_global);
@@ -113,7 +110,7 @@ int main(const int argc, char **argv) {
 
     log_tiempo_etapa("[Leyendo Imagen]");
 
-    detectar_bordes(data_detectar_bordes_device, mascara_bordes_device, imagen_original.size);
+    detectar_bordes(data_detectar_bordes_device, mascara_bordes_device, imagen_original.size, imagen_original.ancho);
 
     iniciar_etapa();
     posterizar<<<M,N>>>(data_posterizada_device, imagen_original.size);
@@ -181,17 +178,6 @@ void *asignar_memoria(int n, size_t size) {
     return temp;
 }
 
-PixelU8 *copiar_data(const PixelU8 *data, const int size) {
-    const auto copia = (PixelU8 *) asignar_memoria(size, sizeof(PixelU8));
-
-    for (int i = 0; i < size; i++) {
-        copia[i].r = data[i].r;
-        copia[i].g = data[i].g;
-        copia[i].b = data[i].b;
-    }
-    return copia;
-}
-
 Imagen leer_imagen(const char *path) {
     Imagen imagen;
     int channels_in_file;
@@ -255,7 +241,7 @@ void guardar_imagen(const Imagen &imagen, char *path) {
     free((void *) data);
 }
 
-void construir_resultado(const Imagen imagen_original, Imagen &resultado, PixelU8 *data_resultado) {
+__host__ void construir_resultado(const Imagen imagen_original, Imagen &resultado, PixelU8 *data_resultado) {
     resultado.size = imagen_original.size;
     resultado.alto = imagen_original.alto;
     resultado.ancho = imagen_original.ancho;
@@ -275,11 +261,11 @@ __global__ void posterizar(PixelU8 *salida, const int size) {
     }
 }
 
-void detectar_bordes(PixelU8 *entrada, unsigned char *salida, const int size) {
+void detectar_bordes(PixelU8 *entrada, unsigned char *salida, const int size, const int ancho) {
     log_tiempo_etapa("[Detección de Bordes] Filtrado");
     filtrar(entrada);
     log_tiempo_etapa("[Detección de Bordes] Resaltado");
-    resaltar(entrada, size);
+    resaltar(entrada, size, ancho);
     log_tiempo_etapa("[Detección de Bordes] Umbralizado");
     umbralizar<<<M,N>>>(entrada, salida, size);
 }
@@ -317,8 +303,9 @@ double **construir_mascara_filtrado(const int size) {
     return mascara;
 }
 
-enum boolean pixel_fuera_de_limite(const int indice_pixel_actual, const int indice_pixel, const int offset_fila,
-                                   const int ancho, const int size) {
+__host__ __device__ boolean pixel_fuera_de_limite(const int indice_pixel_actual, const int indice_pixel,
+                                                  const int offset_fila,
+                                                  const int ancho, const int size) {
     if (indice_pixel_actual < 0)
         return TRUE;
     if (indice_pixel_actual > (size - 1))
@@ -332,22 +319,20 @@ enum boolean pixel_fuera_de_limite(const int indice_pixel_actual, const int indi
     return FALSE;
 }
 
-PixelS16 aplicar_mascara(const Imagen *imagen, const int indice_pixel, const int tamaño_máscara, double **mascara,
-                         double factor_normalización) {
+__device__ PixelS16 aplicar_mascara(const PixelU8 *data, const int indice_pixel, const int tamaño_máscara, double **mascara, const double factor_normalización, const int ancho, const int size) {
     const int medio = tamaño_máscara / 2;
     PixelS16 pixeles_enmascarados[tamaño_máscara][tamaño_máscara];
 
     for (int i = 0; i < tamaño_máscara; i++) {
-        const int offset_fila = (i - medio) * imagen->ancho;
+        const int offset_fila = (i - medio) * ancho;
         for (int j = 0; j < tamaño_máscara; j++) {
             const int offset_columna = j - medio;
             const int indice_pixel_actual = indice_pixel + offset_columna + offset_fila;
-            const enum boolean fuera = pixel_fuera_de_limite(indice_pixel_actual, indice_pixel, offset_fila,
-                                                             imagen->ancho, imagen->size);
+            const boolean fuera = pixel_fuera_de_limite(indice_pixel_actual, indice_pixel, offset_fila, ancho, size);
 
-            pixeles_enmascarados[i][j].r = fuera ? 0 : (short) (mascara[i][j] * imagen->data[indice_pixel_actual].r);
-            pixeles_enmascarados[i][j].g = fuera ? 0 : (short) (mascara[i][j] * imagen->data[indice_pixel_actual].g);
-            pixeles_enmascarados[i][j].b = fuera ? 0 : (short) (mascara[i][j] * imagen->data[indice_pixel_actual].b);
+            pixeles_enmascarados[i][j].r = fuera ? 0 : (short) (mascara[i][j] * data[indice_pixel_actual].r);
+            pixeles_enmascarados[i][j].g = fuera ? 0 : (short) (mascara[i][j] * data[indice_pixel_actual].g);
+            pixeles_enmascarados[i][j].b = fuera ? 0 : (short) (mascara[i][j] * data[indice_pixel_actual].b);
         }
     }
 
@@ -371,7 +356,7 @@ PixelS16 aplicar_mascara(const Imagen *imagen, const int indice_pixel, const int
     return respuesta;
 }
 
-short normalizar_valor(const short valor) {
+__host__ __device__ short normalizar_valor(const short valor) {
     if (valor < 0)
         return 0;
     if (valor > 255)
@@ -380,12 +365,31 @@ short normalizar_valor(const short valor) {
     return valor;
 }
 
-void resaltar(PixelU8 *data, const int size) {
+void resaltar(PixelU8 *data, const int size, const int ancho) {
     pasar_a_gris<<<M,N>>>(data, size);
-    aplicar_operador_gradiente(imagen);
+
+    double **mascara_sobel_horizontal = construir_mascara_sobel(HORIZONTAL);
+    double **mascara_sobel_vertical = construir_mascara_sobel(VERTICAL);
+
+    PixelS16 *data_sobel_horizontal, *data_sobel_vertical;
+    cudaMalloc((void **) &data_sobel_horizontal, size * sizeof(PixelS16));
+    cudaMalloc((void **) &data_sobel_vertical, size * sizeof(PixelS16));
+
+    aplicar_operador_gradiente<<<M,N>>>(data, data_sobel_horizontal, data_sobel_vertical, mascara_sobel_horizontal, mascara_sobel_vertical, size, ancho);
+
+    cudaFree(data_sobel_horizontal);
+    cudaFree(data_sobel_vertical);
+
+    for (int i = 0; i < config.tamaño_mascara_sobel; i++) {
+        cudaFree(mascara_sobel_horizontal[i]);
+        cudaFree(mascara_sobel_vertical[i]);
+    }
+
+    cudaFree(mascara_sobel_horizontal);
+    cudaFree(mascara_sobel_vertical);
 }
 
-void pasar_a_gris(PixelU8 *data, const int size) {
+__global__ void pasar_a_gris(PixelU8 *data, const int size) {
     const unsigned int thread_id_global = blockDim.x * blockIdx.x + threadIdx.x;
     const unsigned int cantidad_threads = gridDim.x * blockDim.x;
 
@@ -397,39 +401,30 @@ void pasar_a_gris(PixelU8 *data, const int size) {
     }
 }
 
-void aplicar_operador_gradiente(const Imagen *imagen) {
-    PixelS16 *data_sobel_horizontal = (PixelS16 *) asignar_memoria(imagen->size, sizeof(PixelS16));
-    PixelS16 *data_sobel_vertical = (PixelS16 *) asignar_memoria(imagen->size, sizeof(PixelS16));
-    double **mascara_sobel_horizontal = construir_mascara_sobel(HORIZONTAL);
-    double **mascara_sobel_vertical = construir_mascara_sobel(VERTICAL);
+__global__ void aplicar_operador_gradiente(PixelU8 *data, PixelS16 *data_sobel_horizontal, PixelS16 *data_sobel_vertical, double **mascara_sobel_horizontal, double **mascara_sobel_vertical, const int size, const int ancho) {
+    /*
+     * aplicar_mascara --> ?
+     */
+    const unsigned int thread_id_global = blockDim.x * blockIdx.x + threadIdx.x;
+    const unsigned int cantidad_threads = gridDim.x * blockDim.x;
 
-    for (int i = 0; i < imagen->size; i++) {
-        data_sobel_horizontal[i] = aplicar_mascara(imagen, i, config.tamaño_mascara_sobel, mascara_sobel_horizontal, 1);
-        data_sobel_vertical[i] = aplicar_mascara(imagen, i, config.tamaño_mascara_sobel, mascara_sobel_vertical, 1);
+
+    for (int i = 0; i < size; i++) {
+        data_sobel_horizontal[i] = aplicar_mascara(data, i, config.tamaño_mascara_sobel, mascara_sobel_horizontal, 1, ancho, size);
+        data_sobel_vertical[i] = aplicar_mascara(data, i, config.tamaño_mascara_sobel, mascara_sobel_vertical, 1, ancho, size);
     }
 
-    for (int i = 0; i < imagen->size; i++) {
+    for (int i = thread_id_global; i < size; i += cantidad_threads) {
         double gx = data_sobel_horizontal[i].r;
         double gy = data_sobel_vertical[i].r;
         short valor = normalizar_valor((short) sqrt(gx * gx + gy * gy));
 
-        imagen->data[i].r = imagen->data[i].g = imagen->data[i].b = (unsigned char) valor;
+        data[i].r = data[i].g = data[i].b = (unsigned char) valor;
     }
-
-    free(data_sobel_horizontal);
-    free(data_sobel_vertical);
-
-    for (int i = 0; i < config.tamaño_mascara_sobel; i++) {
-        free(mascara_sobel_horizontal[i]);
-        free(mascara_sobel_vertical[i]);
-    }
-
-    free(mascara_sobel_horizontal);
-    free(mascara_sobel_vertical);
 }
 
 double **construir_mascara_sobel(enum tipo_sobel tipo) {
-    double **mascara = (double **) asignar_memoria(config.tamaño_mascara_sobel, sizeof(double *));
+    const auto mascara = (double **) asignar_memoria(config.tamaño_mascara_sobel, sizeof(double *));
 
     mascara[0] = (double *) asignar_memoria(config.tamaño_mascara_sobel, sizeof(double));
     mascara[1] = (double *) asignar_memoria(config.tamaño_mascara_sobel, sizeof(double));
@@ -456,6 +451,23 @@ double **construir_mascara_sobel(enum tipo_sobel tipo) {
         mascara[2][1] = -2;
         mascara[2][2] = -1;
     }
+
+    double **mascara_device;
+    cudaMalloc((void **) &mascara_device, sizeof(double *) * config.tamaño_mascara_sobel);
+
+    cudaMalloc((void **) &mascara_device[0], sizeof(double) * config.tamaño_mascara_sobel);
+    cudaMalloc((void **) &mascara_device[1], sizeof(double) * config.tamaño_mascara_sobel);
+    cudaMalloc((void **) &mascara_device[2], sizeof(double) * config.tamaño_mascara_sobel);
+
+    cudaMemcpy(mascara_device[0], mascara[0], sizeof(double) * config.tamaño_mascara_sobel, cudaMemcpyHostToDevice);
+    cudaMemcpy(mascara_device[1], mascara[1], sizeof(double) * config.tamaño_mascara_sobel, cudaMemcpyHostToDevice);
+    cudaMemcpy(mascara_device[2], mascara[2], sizeof(double) * config.tamaño_mascara_sobel, cudaMemcpyHostToDevice);
+
+    for (int i = 0; i < config.tamaño_mascara_sobel; i++) {
+        free(mascara[i]);
+    }
+
+    free(mascara);
 
     return mascara;
 }
