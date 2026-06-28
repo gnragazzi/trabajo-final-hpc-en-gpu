@@ -51,7 +51,7 @@ Imagen leer_imagen(const char *);
 
 void detectar_bordes(const PixelU8 *entrada, unsigned char *salida, int size, int ancho);
 
-void filtrar(Imagen *);
+void filtrar(const PixelU8 *entrada, PixelU8 *filtrada, double ** mascara, int ancho, int size);
 
 void resaltar(PixelU8 *data, int size, int ancho);
 
@@ -67,7 +67,7 @@ PixelS16 aplicar_mascara(const PixelU8 *data, int indice_pixel, int tamaño_más
 
 __host__ __device__ short normalizar_valor(short valor);
 
-double **construir_mascara_filtrado(int size);
+__host__ __device__ double **construir_mascara_filtrado(int size);
 
 __global__ void posterizar(PixelU8 *salida, int size);
 
@@ -263,34 +263,33 @@ __global__ void posterizar(PixelU8 *salida, const int size) {
 
 void detectar_bordes(PixelU8 *entrada, unsigned char *salida, const int size, const int ancho) {
     log_tiempo_etapa("[Detección de Bordes] Filtrado");
-    filtrar(entrada);
-    log_tiempo_etapa("[Detección de Bordes] Resaltado");
-    resaltar(entrada, size, ancho);
-    log_tiempo_etapa("[Detección de Bordes] Umbralizado");
-    umbralizar<<<M,N>>>(entrada, salida, size);
-}
 
-void filtrar(Imagen *imagen) {
-    const auto data_blureada = (PixelU8 *) asignar_memoria(imagen->size, sizeof(PixelU8));
+    PixelU8 *filtrada;
+    cudaMalloc((void **) &filtrada, sizeof(PixelU8) * size);
     double **máscara = construir_mascara_filtrado(config.tamaño_mascara);
 
-    for (int i = 0; i < imagen->size; i++) {
-        PixelS16 valor = aplicar_mascara(imagen, i, config.tamaño_mascara, máscara,
-                                         1.0 / (config.tamaño_mascara * config.tamaño_mascara));
-        data_blureada[i].r = (unsigned char) valor.r;
-        data_blureada[i].g = (unsigned char) valor.g;
-        data_blureada[i].b = (unsigned char) valor.b;
-    }
+    filtrar(entrada, filtrada, máscara, ancho, size);
+    log_tiempo_etapa("[Detección de Bordes] Resaltado");
+    resaltar(filtrada, size, ancho);
+    log_tiempo_etapa("[Detección de Bordes] Umbralizado");
+    umbralizar<<<M,N>>>(filtrada, salida, size);
 
-    free(imagen->data);
+    cudaFree(filtrada);
     for (int i = 0; i < config.tamaño_mascara; i++)
-        free(máscara[i]);
-    free(máscara);
-
-    imagen->data = data_blureada;
+        cudaFree(máscara[i]);
+    cudaFree(máscara);
 }
 
-double **construir_mascara_filtrado(const int size) {
+__global__ void filtrar(const PixelU8 *entrada, PixelU8 *filtrada, double ** mascara, const int ancho, const int size) {
+    for (int i = 0; i < size; i++) {
+        const PixelS16 valor = aplicar_mascara(entrada, i, config.tamaño_mascara, mascara, 1.0 / (config.tamaño_mascara * config.tamaño_mascara), ancho, size);
+        filtrada[i].r = (unsigned char) valor.r;
+        filtrada[i].g = (unsigned char) valor.g;
+        filtrada[i].b = (unsigned char) valor.b;
+    }
+}
+
+__host__ __device__ double **construir_mascara_filtrado(const int size) {
     const auto mascara = (double **) asignar_memoria(size, sizeof(double *));
 
     for (int i = 0; i < size; i++) {
@@ -300,7 +299,19 @@ double **construir_mascara_filtrado(const int size) {
         }
     }
 
-    return mascara;
+    double **mascara_device;
+    cudaMalloc((void **) &mascara_device, sizeof(double *) * size);
+
+    for (int i = 0; i < size; i++) {
+        cudaMalloc((void **) &mascara_device[i], sizeof(double) * size);
+        cudaMemcpy(mascara_device[i], mascara[i], sizeof(double) * size, cudaMemcpyHostToDevice);
+    }
+
+    for (int i = 0; i < config.tamaño_mascara; i++)
+        free(mascara[i]);
+    free(mascara);
+
+    return mascara_device;
 }
 
 __host__ __device__ boolean pixel_fuera_de_limite(const int indice_pixel_actual, const int indice_pixel,
@@ -402,9 +413,6 @@ __global__ void pasar_a_gris(PixelU8 *data, const int size) {
 }
 
 __global__ void aplicar_operador_gradiente(PixelU8 *data, PixelS16 *data_sobel_horizontal, PixelS16 *data_sobel_vertical, double **mascara_sobel_horizontal, double **mascara_sobel_vertical, const int size, const int ancho) {
-    /*
-     * aplicar_mascara --> ?
-     */
     const unsigned int thread_id_global = blockDim.x * blockIdx.x + threadIdx.x;
     const unsigned int cantidad_threads = gridDim.x * blockDim.x;
 
