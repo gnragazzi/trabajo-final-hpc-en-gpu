@@ -2,13 +2,14 @@
 #include <stdlib.h>
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #define STB_IMAGE_IMPLEMENTATION
-#define M 8
-#define N 128
 #include <stb_image.h>
 #include <stb_image_write.h>
 #include <time.h>
 #include <config.h>
 #include <unistd.h>
+#define M 8
+#define N 128
+#define DIMENSION_TILE 32
 
 typedef struct {
     unsigned char r, g, b;
@@ -51,7 +52,7 @@ Imagen leer_imagen(const char *);
 
 void detectar_bordes(const PixelU8 *entrada, unsigned char *salida, int size, int ancho);
 
-void filtrar(const PixelU8 *entrada, PixelU8 *filtrada, double ** mascara, int ancho, int size);
+void filtrar(const PixelU8 *entrada, PixelU8 *filtrada, double ** mascara, int radio, int ancho, int size, int lado_tile, int tile_size);
 
 void resaltar(PixelU8 *data, int size, int ancho);
 
@@ -63,7 +64,7 @@ __global__ void aplicar_operador_gradiente(PixelU8 *data, PixelS16 *data_sobel_h
 
 double **construir_mascara_sobel(enum tipo_sobel);
 
-PixelS16 aplicar_mascara(const PixelU8 *data, int indice_pixel, int tamaño_máscara, double **mascara, double factor_normalización, int ancho, int size);
+PixelS16 aplicar_mascara(const PixelU8 *data, int indice_pixel, int tamaño_mascara, double **mascara, double factor_normalización, int ancho, int size);
 
 __host__ __device__ short normalizar_valor(short valor);
 
@@ -266,9 +267,12 @@ void detectar_bordes(PixelU8 *entrada, unsigned char *salida, const int size, co
 
     PixelU8 *filtrada;
     cudaMalloc((void **) &filtrada, sizeof(PixelU8) * size);
-    double **máscara = construir_mascara_filtrado(config.tamaño_mascara);
+    double **mascara = construir_mascara_filtrado(config.tamaño_mascara);
+    const int radio = config.tamaño_mascara / 2;
+    int lado_tile = (DIMENSION_TILE + 2*radio);
+    int tile_size = lado_tile * lado_tile * sizeof(PixelU8);
+    filtrar<<<M, N, tile_size>>>(entrada, filtrada, mascara, radio, ancho, size, lado_tile, tile_size);
 
-    filtrar(entrada, filtrada, máscara, ancho, size);
     log_tiempo_etapa("[Detección de Bordes] Resaltado");
     resaltar(filtrada, size, ancho);
     log_tiempo_etapa("[Detección de Bordes] Umbralizado");
@@ -276,13 +280,26 @@ void detectar_bordes(PixelU8 *entrada, unsigned char *salida, const int size, co
 
     cudaFree(filtrada);
     for (int i = 0; i < config.tamaño_mascara; i++)
-        cudaFree(máscara[i]);
-    cudaFree(máscara);
+        cudaFree(mascara[i]);
+    cudaFree(mascara);
 }
 
-__global__ void filtrar(const PixelU8 *entrada, PixelU8 *filtrada, double ** mascara, const int ancho, const int size) {
-    for (int i = 0; i < size; i++) {
-        const PixelS16 valor = aplicar_mascara(entrada, i, config.tamaño_mascara, mascara, 1.0 / (config.tamaño_mascara * config.tamaño_mascara), ancho, size);
+__global__ void filtrar(const PixelU8 *entrada, PixelU8 *filtrada, double ** mascara, int radio, int ancho, int size, int lado_tile, int tile_size) {
+    extern __shared__ PixelU8 smem[];
+    const unsigned int thread_id_global = blockDim.x * blockIdx.x + threadIdx.x;
+    const unsigned int cantidad_threads_global = gridDim.x * blockDim.x;
+    const unsigned int thread_id_local = threadIdx.x;
+    const unsigned int cantidad_threads_local = blockDim.x;
+
+    const int lado_tile_util = lado_tile - 2*radio;
+    const int tile_size_util = lado_tile_util * lado_tile_util;
+
+    for (int i = thread_id_local; i < tile_size_util; i+= cantidad_threads_local) {
+        const int coordenada_x = (i % lado_tile_util) + radio;
+        const int coordenada_y = (i / lado_tile_util) + radio;
+        const int indice_pixel = coordenada_y * lado_tile + coordenada_x;
+
+        const PixelS16 valor = aplicar_mascara(smem, indice_pixel, config.tamaño_mascara, mascara, 1.0 / (config.tamaño_mascara * config.tamaño_mascara), DIMENSION_TILE, tile_size);
         filtrada[i].r = (unsigned char) valor.r;
         filtrada[i].g = (unsigned char) valor.g;
         filtrada[i].b = (unsigned char) valor.b;
@@ -330,13 +347,13 @@ __host__ __device__ boolean pixel_fuera_de_limite(const int indice_pixel_actual,
     return FALSE;
 }
 
-__device__ PixelS16 aplicar_mascara(const PixelU8 *data, const int indice_pixel, const int tamaño_máscara, double **mascara, const double factor_normalización, const int ancho, const int size) {
-    const int medio = tamaño_máscara / 2;
-    PixelS16 pixeles_enmascarados[tamaño_máscara][tamaño_máscara];
+__device__ PixelS16 aplicar_mascara(const PixelU8 *data, const int indice_pixel, const int tamaño_mascara, double **mascara, const double factor_normalización, const int ancho, const int size) {
+    const int medio = tamaño_mascara / 2;
+    PixelS16 pixeles_enmascarados[tamaño_mascara][tamaño_mascara];
 
-    for (int i = 0; i < tamaño_máscara; i++) {
+    for (int i = 0; i < tamaño_mascara; i++) {
         const int offset_fila = (i - medio) * ancho;
-        for (int j = 0; j < tamaño_máscara; j++) {
+        for (int j = 0; j < tamaño_mascara; j++) {
             const int offset_columna = j - medio;
             const int indice_pixel_actual = indice_pixel + offset_columna + offset_fila;
             const boolean fuera = pixel_fuera_de_limite(indice_pixel_actual, indice_pixel, offset_fila, ancho, size);
@@ -351,8 +368,8 @@ __device__ PixelS16 aplicar_mascara(const PixelU8 *data, const int indice_pixel,
     int nuevo_g = 0;
     int nuevo_b = 0;
 
-    for (int i = 0; i < tamaño_máscara; i++) {
-        for (int j = 0; j < tamaño_máscara; j++) {
+    for (int i = 0; i < tamaño_mascara; i++) {
+        for (int j = 0; j < tamaño_mascara; j++) {
             nuevo_r += pixeles_enmascarados[i][j].r;
             nuevo_g += pixeles_enmascarados[i][j].g;
             nuevo_b += pixeles_enmascarados[i][j].b;
