@@ -283,8 +283,8 @@ void detectar_bordes(const PixelU8 *entrada, unsigned char *salida, const int si
     umbralizar<<<M,N>>>(filtrada, salida, size, config.umbral);
 
     cudaFree(filtrada);
-    for (int i = 0; i < config.tamaño_mascara; i++)
-        cudaFree(mascara[i]);
+    // for (int i = 0; i < config.tamaño_mascara; i++)
+    //     cudaFree(mascara[i]);
     cudaFree(mascara);
 }
 
@@ -454,10 +454,10 @@ void resaltar(PixelU8 *data, const int size, const int ancho) {
     cudaFree(data_sobel_horizontal);
     cudaFree(data_sobel_vertical);
 
-    for (int i = 0; i < config.tamano_mascara_sobel; i++) {
-        cudaFree(mascara_sobel_horizontal[i]);
-        cudaFree(mascara_sobel_vertical[i]);
-    }
+    // for (int i = 0; i < config.tamano_mascara_sobel; i++) {
+    //     cudaFree(mascara_sobel_horizontal[i]);
+    //     cudaFree(mascara_sobel_vertical[i]);
+    // }
 
     cudaFree(mascara_sobel_horizontal);
     cudaFree(mascara_sobel_vertical);
