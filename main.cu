@@ -7,8 +7,7 @@
 #include <time.h>
 #include <config.h>
 #include <unistd.h>
-#define M 128
-#define N 512
+#define N 256
 #define DIMENSION_TILE 32
 
 typedef struct {
@@ -106,6 +105,8 @@ int main(const int argc, char **argv) {
     PixelU8 *data_posterizada_device, *data_detectar_bordes_device, *data_resultado;
     unsigned char *mascara_bordes_device;
 
+    int M_map  = (imagen_original.size + N - 1) / N;
+
     cudaMalloc((void **) &data_posterizada_device, sizeof(PixelU8) * imagen_original.size);
     cudaMalloc((void **) &data_detectar_bordes_device, sizeof(PixelU8) * imagen_original.size);
     cudaMalloc((void **) &data_resultado, sizeof(PixelU8) * imagen_original.size);
@@ -121,10 +122,10 @@ int main(const int argc, char **argv) {
     detectar_bordes(data_detectar_bordes_device, mascara_bordes_device, imagen_original.size, imagen_original.ancho);
 
     iniciar_etapa();
-    posterizar<<<M,N>>>(data_posterizada_device, imagen_original.size, config.valor_max_rgb, config.rango_posterizado);
+    posterizar<<<M_map,N>>>(data_posterizada_device, imagen_original.size, config.valor_max_rgb, config.rango_posterizado);
 
     log_tiempo_etapa("[Posterizando Imagen]");
-    unir_imagenes<<<M, N>>>(mascara_bordes_device, data_posterizada_device, data_resultado, imagen_original.size);
+    unir_imagenes<<<M_map, N>>>(mascara_bordes_device, data_posterizada_device, data_resultado, imagen_original.size);
     log_tiempo_etapa("[Uniendo Imágenes]");
 
     iniciar_etapa();
@@ -279,6 +280,7 @@ void liberar_mascara_device(const MascaraDevice &m, const int size) {
 void detectar_bordes(const PixelU8 *entrada, unsigned char *salida, const int size, const int ancho) {
     log_tiempo_etapa("[Detección de Bordes] Filtrado");
 
+
     PixelU8 *filtrada;
     cudaMalloc((void **) &filtrada, sizeof(PixelU8) * size);
     const MascaraDevice mascara = construir_mascara_filtrado(config.tamaño_mascara);
@@ -287,12 +289,15 @@ void detectar_bordes(const PixelU8 *entrada, unsigned char *salida, const int si
     const int lado_tile = (DIMENSION_TILE + 2*radio);
     const int tile_size = lado_tile * lado_tile;
 
-    filtrar<<<M, N, tile_size * sizeof(PixelU8)>>>(entrada, filtrada, mascara.device, config.tamaño_mascara,  ancho, size, lado_tile, tile_size);
+    int M_map  = (size + N - 1) / N;
+    int M_tile = lado_tile * lado_tile;
+
+    filtrar<<<M_tile, N, tile_size * sizeof(PixelU8)>>>(entrada, filtrada, mascara.device, config.tamaño_mascara,  ancho, size, lado_tile, tile_size);
 
     log_tiempo_etapa("[Detección de Bordes] Resaltado");
     resaltar(filtrada, size, ancho);
     log_tiempo_etapa("[Detección de Bordes] Umbralizado");
-    umbralizar<<<M,N>>>(filtrada, salida, size, config.umbral);
+    umbralizar<<<M_map,N>>>(filtrada, salida, size, config.umbral);
 
     cudaFree(filtrada);
     liberar_mascara_device(mascara, config.tamaño_mascara);
@@ -440,7 +445,9 @@ __host__ __device__ short normalizar_valor(const short valor) {
 }
 
 void resaltar(PixelU8 *data, const int size, const int ancho) {
-    pasar_a_gris<<<M,N>>>(data, size);
+    int M_map  = (size + N - 1) / N;
+
+    pasar_a_gris<<<M_map,N>>>(data, size);
 
     MascaraDevice mascara_sobel_horizontal = construir_mascara_sobel(HORIZONTAL);
     MascaraDevice mascara_sobel_vertical = construir_mascara_sobel(VERTICAL);
@@ -453,11 +460,12 @@ void resaltar(PixelU8 *data, const int size, const int ancho) {
 
     const int lado_tile = (DIMENSION_TILE + 2*radio);
     const int tile_size = lado_tile * lado_tile;
+    int M_tile = lado_tile * lado_tile;
 
-    calcular_sobel<<<M, N, tile_size * sizeof(PixelU8)>>>(data, data_sobel_horizontal, data_sobel_vertical, mascara_sobel_horizontal.device,
+    calcular_sobel<<<M_tile, N, tile_size * sizeof(PixelU8)>>>(data, data_sobel_horizontal, data_sobel_vertical, mascara_sobel_horizontal.device,
                                         mascara_sobel_vertical.device, config.tamano_mascara_sobel, size, ancho, lado_tile,
                                         tile_size);
-    combinar_sobel<<<M, N>>>(data, data_sobel_horizontal, data_sobel_vertical, size);
+    combinar_sobel<<<M_tile, N>>>(data, data_sobel_horizontal, data_sobel_vertical, size);
 
     cudaFree(data_sobel_horizontal);
     cudaFree(data_sobel_vertical);
