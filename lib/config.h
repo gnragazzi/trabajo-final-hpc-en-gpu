@@ -6,7 +6,7 @@ typedef struct {
     int rango_posterizado;
     int valor_max_rgb;
     int tamaño_mascara;
-    int tamaño_mascara_sobel;
+    int tamano_mascara_sobel;
     int umbral;
     char path_imagen[50];
 } Config;

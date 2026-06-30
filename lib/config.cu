@@ -20,7 +20,7 @@ Config leer_config(const char *path) {
         {"RANGO_POSTERIZADO",    &config.rango_posterizado,   0},
         {"VALOR_MAX_RGB",        &config.valor_max_rgb,       0},
         {"TAMAÑO_MASCARA",       &config.tamaño_mascara,      0},
-        {"TAMAÑO_MASCARA_SOBEL", &config.tamaño_mascara_sobel, 0},
+        {"TAMAÑO_MASCARA_SOBEL", &config.tamano_mascara_sobel, 0},
         {"UMBRAL",               &config.umbral,              0},
     };
     const int n_entries = sizeof(entries) / sizeof(entries[0]);
