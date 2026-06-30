@@ -578,7 +578,6 @@ MascaraDevice construir_mascara_sobel(const enum tipo_sobel tipo) {
 
     cudaMemcpy(mascara_device, mascara_host_de_punteros_device, sizeof(double *) * config.tamano_mascara_sobel, cudaMemcpyHostToDevice);
 
-    free(mascara_host_de_punteros_device);  // esto SÍ es liberable: era solo el array temporal en host
     for (int i = 0; i < config.tamano_mascara_sobel; i++) {
         free(mascara[i]);
     }
