@@ -7,8 +7,8 @@
 #include <time.h>
 #include <config.h>
 #include <unistd.h>
-#define M 8
-#define N 128
+#define M 128
+#define N 512
 #define DIMENSION_TILE 32
 
 typedef struct {
@@ -60,7 +60,7 @@ __global__ void umbralizar(const PixelU8 *entrada, unsigned char *salida, int si
 
 __global__ void pasar_a_gris(PixelU8 *data, int size);
 
-__global__ void calcular_sobel(const PixelU8 *data, PixelS16 *data_sobel_horizontal, PixelS16 *data_sobel_vertical, double **mascara_sobel_horizontal, double **mascara_sobel_vertical, const int tamaño_mascara_sobel, const int size, const int ancho, const int lado_tile, const int tile_size);
+__global__ void calcular_sobel(const PixelU8 *data, PixelS16 *data_sobel_horizontal, PixelS16 *data_sobel_vertical, double **mascara_sobel_horizontal, double **mascara_sobel_vertical, const int tamano_mascara_sobel, const int size, const int ancho, const int lado_tile, const int tile_size);
 
 __global__ void combinar_sobel(PixelU8 *data, const PixelS16 *data_sobel_horizontal, const PixelS16 *data_sobel_vertical, const int size);
 
@@ -250,7 +250,7 @@ __host__ void construir_resultado(const Imagen &imagen_original, Imagen &resulta
     resultado.ancho = imagen_original.ancho;
     resultado.data = (PixelU8 *) asignar_memoria(resultado.size, sizeof(PixelU8));
 
-    cudaMemcpy(resultado.data, data_resultado, resultado.size, cudaMemcpyDeviceToHost);
+    cudaMemcpy(resultado.data, data_resultado, resultado.size * sizeof(PixelU8), cudaMemcpyDeviceToHost);
 }
 
 __global__ void posterizar(PixelU8 *salida, const int size, const int valor_max_rgb, const int rango_posterizado) {
@@ -360,26 +360,22 @@ __global__ void filtrar(const PixelU8 *entrada, PixelU8 *filtrada, double **masc
 }
 
 double **construir_mascara_filtrado(const int size) {
-    const auto mascara = (double **) asignar_memoria(size, sizeof(double *));
+    double **mascara_host_temp = (double **) asignar_memoria(size, sizeof(double *));
 
     for (int i = 0; i < size; i++) {
-        mascara[i] = (double *) asignar_memoria(size, sizeof(double));
-        for (int j = 0; j < size; j++) {
-            mascara[i][j] = 1;
-        }
+        double *fila = (double *) asignar_memoria(size, sizeof(double));
+        for (int j = 0; j < size; j++) fila[j] = 1;
+
+        cudaMalloc((void **) &mascara_host_temp[i], sizeof(double) * size);
+        cudaMemcpy(mascara_host_temp[i], fila, sizeof(double) * size, cudaMemcpyHostToDevice);
+        free(fila);
     }
 
     double **mascara_device;
     cudaMalloc((void **) &mascara_device, sizeof(double *) * size);
+    cudaMemcpy(mascara_device, mascara_host_temp, sizeof(double *) * size, cudaMemcpyHostToDevice);
 
-    for (int i = 0; i < size; i++) {
-        cudaMalloc((void **) &mascara_device[i], sizeof(double) * size);
-        cudaMemcpy(mascara_device[i], mascara[i], sizeof(double) * size, cudaMemcpyHostToDevice);
-    }
-
-    for (int i = 0; i < size; i++)
-        free(mascara[i]);
-    free(mascara);
+    free(mascara_host_temp);
 
     return mascara_device;
 }
@@ -479,10 +475,10 @@ __global__ void pasar_a_gris(PixelU8 *data, const int size) {
     }
 }
 
-__global__ void calcular_sobel(const PixelU8 *data, PixelS16 *data_sobel_horizontal, PixelS16 *data_sobel_vertical, double **mascara_sobel_horizontal, double **mascara_sobel_vertical, const int tamaño_mascara_sobel, const int size, const int ancho, const int lado_tile, const int tile_size) {
+__global__ void calcular_sobel(const PixelU8 *data, PixelS16 *data_sobel_horizontal, PixelS16 *data_sobel_vertical, double **mascara_sobel_horizontal, double **mascara_sobel_vertical, const int tamano_mascara_sobel, const int size, const int ancho, const int lado_tile, const int tile_size) {
     extern __shared__ PixelU8 tile_shared[];
     const int alto = size / ancho;
-    const int radio = tamaño_mascara_sobel / 2;
+    const int radio = tamano_mascara_sobel / 2;
     const int lado_tile_util = lado_tile - 2 * radio;
     const int tile_size_util = lado_tile_util * lado_tile_util;
     const int tiles_eje_x = ceil((double) ancho / lado_tile_util);
@@ -506,9 +502,9 @@ __global__ void calcular_sobel(const PixelU8 *data, PixelS16 *data_sobel_horizon
             const int coordenada_y = (j / lado_tile_util) + radio;
             const int indice_pixel = coordenada_y * lado_tile + coordenada_x;
 
-            const PixelS16 valor_h = aplicar_mascara(tile_shared, indice_pixel, tamaño_mascara_sobel,
+            const PixelS16 valor_h = aplicar_mascara(tile_shared, indice_pixel, tamano_mascara_sobel,
                                                       mascara_sobel_horizontal, 1, lado_tile, tile_size);
-            const PixelS16 valor_v = aplicar_mascara(tile_shared, indice_pixel, tamaño_mascara_sobel,
+            const PixelS16 valor_v = aplicar_mascara(tile_shared, indice_pixel, tamano_mascara_sobel,
                                                       mascara_sobel_vertical, 1, lado_tile, tile_size);
 
             const int x_global = coordinada_bloque_x + (j % lado_tile_util);
@@ -537,7 +533,7 @@ __global__ void combinar_sobel(PixelU8 *data, const PixelS16 *data_sobel_horizon
         data[i].r = data[i].g = data[i].b = (unsigned char) valor;
     }
 }
-double **construir_mascara_sobel(enum tipo_sobel tipo) {
+double **construir_mascara_sobel(const enum tipo_sobel tipo) {
     const auto mascara = (double **) asignar_memoria(config.tamano_mascara_sobel, sizeof(double *));
 
     mascara[0] = (double *) asignar_memoria(config.tamano_mascara_sobel, sizeof(double));
@@ -566,24 +562,27 @@ double **construir_mascara_sobel(enum tipo_sobel tipo) {
         mascara[2][2] = -1;
     }
 
+    const auto mascara_host_de_punteros_device = (double **) malloc(sizeof(double *) * config.tamano_mascara_sobel);
+
+    for (int i = 0; i < config.tamano_mascara_sobel; i++) {
+        cudaMalloc((void **) &mascara_host_de_punteros_device[i], sizeof(double) * config.tamano_mascara_sobel);
+
+        cudaMemcpy(mascara_host_de_punteros_device[i], mascara[i], sizeof(double) * config.tamano_mascara_sobel, cudaMemcpyHostToDevice);
+    }
+
     double **mascara_device;
     cudaMalloc((void **) &mascara_device, sizeof(double *) * config.tamano_mascara_sobel);
 
-    cudaMalloc((void **) &mascara_device[0], sizeof(double) * config.tamano_mascara_sobel);
-    cudaMalloc((void **) &mascara_device[1], sizeof(double) * config.tamano_mascara_sobel);
-    cudaMalloc((void **) &mascara_device[2], sizeof(double) * config.tamano_mascara_sobel);
+    cudaMemcpy(mascara_device, mascara_host_de_punteros_device, sizeof(double *) * config.tamano_mascara_sobel, cudaMemcpyHostToDevice);
 
-    cudaMemcpy(mascara_device[0], mascara[0], sizeof(double) * config.tamano_mascara_sobel, cudaMemcpyHostToDevice);
-    cudaMemcpy(mascara_device[1], mascara[1], sizeof(double) * config.tamano_mascara_sobel, cudaMemcpyHostToDevice);
-    cudaMemcpy(mascara_device[2], mascara[2], sizeof(double) * config.tamano_mascara_sobel, cudaMemcpyHostToDevice);
-
+    free(mascara_host_de_punteros_device);  // esto SÍ es liberable: era solo el array temporal en host
     for (int i = 0; i < config.tamano_mascara_sobel; i++) {
         free(mascara[i]);
     }
 
     free(mascara);
 
-    return mascara;
+    return mascara_device;
 }
 
 __global__ void umbralizar(const PixelU8 *entrada, unsigned char *salida, const int size, const int umbral) {
