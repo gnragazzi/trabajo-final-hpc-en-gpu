@@ -60,7 +60,9 @@ __global__ void umbralizar(const PixelU8 *entrada, unsigned char *salida, int si
 
 __global__ void pasar_a_gris(PixelU8 *data, int size);
 
-__global__ void aplicar_operador_gradiente(PixelU8 *data, PixelS16 *data_sobel_horizontal, PixelS16 *data_sobel_vertical, double **mascara_sobel_horizontal, double **mascara_sobel_vertical, int size, int ancho);
+__global__ void calcular_sobel(const PixelU8 *data, PixelS16 *data_sobel_horizontal, PixelS16 *data_sobel_vertical, double **mascara_sobel_horizontal, double **mascara_sobel_vertical, const int tamaño_mascara_sobel, const int size, const int ancho, const int lado_tile, const int tile_size);
+
+__global__ void combinar_sobel(PixelU8 *data, const PixelS16 *data_sobel_horizontal, const PixelS16 *data_sobel_vertical, const int size);
 
 double **construir_mascara_sobel(enum tipo_sobel);
 
@@ -452,7 +454,15 @@ void resaltar(PixelU8 *data, const int size, const int ancho) {
     cudaMalloc((void **) &data_sobel_horizontal, size * sizeof(PixelS16));
     cudaMalloc((void **) &data_sobel_vertical, size * sizeof(PixelS16));
 
-    aplicar_operador_gradiente<<<M,N>>>(data, data_sobel_horizontal, data_sobel_vertical, mascara_sobel_horizontal, mascara_sobel_vertical, size, ancho);
+    const int radio = config.tamaño_mascara_sobel / 2;
+
+    const int lado_tile = (DIMENSION_TILE + 2*radio);
+    const int tile_size = lado_tile * lado_tile;
+
+    calcular_sobel<<<M, N, tile_size * sizeof(PixelU8)>>>(data, data_sobel_horizontal, data_sobel_vertical, mascara_sobel_horizontal,
+                                        mascara_sobel_vertical, config.tamaño_mascara_sobel, size, ancho, lado_tile,
+                                        tile_size);
+    combinar_sobel<<<M, N>>>(data, data_sobel_horizontal, data_sobel_vertical, size);
 
     cudaFree(data_sobel_horizontal);
     cudaFree(data_sobel_vertical);
@@ -478,15 +488,55 @@ __global__ void pasar_a_gris(PixelU8 *data, const int size) {
     }
 }
 
-__global__ void aplicar_operador_gradiente(PixelU8 *data, PixelS16 *data_sobel_horizontal, PixelS16 *data_sobel_vertical, double **mascara_sobel_horizontal, double **mascara_sobel_vertical, const int size, const int ancho) {
+__global__ void calcular_sobel(const PixelU8 *data, PixelS16 *data_sobel_horizontal, PixelS16 *data_sobel_vertical, double **mascara_sobel_horizontal, double **mascara_sobel_vertical, const int tamaño_mascara_sobel, const int size, const int ancho, const int lado_tile, const int tile_size) {
+    extern __shared__ PixelU8 tile_shared[];
+    const int alto = size / ancho;
+    const int radio = tamaño_mascara_sobel / 2;
+    const int lado_tile_util = lado_tile - 2 * radio;
+    const int tile_size_util = lado_tile_util * lado_tile_util;
+    const int tiles_eje_x = ceil((double) ancho / lado_tile_util);
+    const int tiles_eje_y = ceil((double) alto / lado_tile_util);
+
+    const unsigned int thread_id_local = threadIdx.x;
+    const unsigned int cantidad_threads_local = blockDim.x;
+
+    for (int i = blockIdx.x; i < tiles_eje_x * tiles_eje_y; i += gridDim.x) {
+        const int coordinada_bloque_x = (i % tiles_eje_x) * lado_tile_util;
+        const int coordenada_bloque_y = (i / tiles_eje_x) * lado_tile_util;
+
+        const int indice_primer_elemento = coordenada_bloque_y * ancho + coordinada_bloque_x;
+
+        construir_tile(data, ancho, size, tile_shared, lado_tile, tile_size, radio, indice_primer_elemento);
+
+        __syncthreads();
+
+        for (int j = thread_id_local; j < tile_size_util; j += cantidad_threads_local) {
+            const int coordenada_x = (j % lado_tile_util) + radio;
+            const int coordenada_y = (j / lado_tile_util) + radio;
+            const int indice_pixel = coordenada_y * lado_tile + coordenada_x;
+
+            const PixelS16 valor_h = aplicar_mascara(tile_shared, indice_pixel, tamaño_mascara_sobel,
+                                                      mascara_sobel_horizontal, 1, lado_tile, tile_size);
+            const PixelS16 valor_v = aplicar_mascara(tile_shared, indice_pixel, tamaño_mascara_sobel,
+                                                      mascara_sobel_vertical, 1, lado_tile, tile_size);
+
+            const int x_global = coordinada_bloque_x + (j % lado_tile_util);
+            const int y_global = coordenada_bloque_y + (j / lado_tile_util);
+
+            if (x_global < ancho && y_global < alto) {
+                const int idx_global = y_global * ancho + x_global;
+                data_sobel_horizontal[idx_global] = valor_h;
+                data_sobel_vertical[idx_global] = valor_v;
+            }
+        }
+
+        __syncthreads();
+    }
+}
+
+__global__ void combinar_sobel(PixelU8 *data, const PixelS16 *data_sobel_horizontal, const PixelS16 *data_sobel_vertical, const int size) {
     const unsigned int thread_id_global = blockDim.x * blockIdx.x + threadIdx.x;
     const unsigned int cantidad_threads = gridDim.x * blockDim.x;
-
-
-    for (int i = 0; i < size; i++) {
-        data_sobel_horizontal[i] = aplicar_mascara(data, i, config.tamaño_mascara_sobel, mascara_sobel_horizontal, 1, ancho, size);
-        data_sobel_vertical[i] = aplicar_mascara(data, i, config.tamaño_mascara_sobel, mascara_sobel_vertical, 1, ancho, size);
-    }
 
     for (int i = thread_id_global; i < size; i += cantidad_threads) {
         double gx = data_sobel_horizontal[i].r;
@@ -496,7 +546,6 @@ __global__ void aplicar_operador_gradiente(PixelU8 *data, PixelS16 *data_sobel_h
         data[i].r = data[i].g = data[i].b = (unsigned char) valor;
     }
 }
-
 double **construir_mascara_sobel(enum tipo_sobel tipo) {
     const auto mascara = (double **) asignar_memoria(config.tamaño_mascara_sobel, sizeof(double *));
 
