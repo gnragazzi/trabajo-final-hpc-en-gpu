@@ -52,11 +52,11 @@ Imagen leer_imagen(const char *);
 
 void detectar_bordes(const PixelU8 *entrada, unsigned char *salida, int size, int ancho);
 
-void filtrar(const PixelU8 *entrada, PixelU8 *filtrada, double ** mascara, int radio, int ancho, int size, int lado_tile, int tile_size);
+void filtrar(const PixelU8 *entrada, PixelU8 *filtrada, double ** mascara, int tamaño_mascara, int ancho, int size, int lado_tile, int tile_size);
 
 void resaltar(PixelU8 *data, int size, int ancho);
 
-__global__ void umbralizar(PixelU8 *entrada, unsigned char *salida, int size);
+__global__ void umbralizar(const PixelU8 *entrada, unsigned char *salida, int size);
 
 __global__ void pasar_a_gris(PixelU8 *data, int size);
 
@@ -79,7 +79,7 @@ __global__ void unir_imagenes(const unsigned char *mascara, const PixelU8 *data_
 
 void guardar_imagen(const Imagen &, char *);
 
-__host__ void construir_resultado(Imagen imagen_original, Imagen &resultado, PixelU8 *data_resultado);
+__host__ void construir_resultado(const Imagen &imagen_original, Imagen &resultado, const PixelU8 *data_resultado);
 
 int main(const int argc, char **argv) {
     clock_gettime(CLOCK_MONOTONIC, &inicio_global);
@@ -242,7 +242,7 @@ void guardar_imagen(const Imagen &imagen, char *path) {
     free((void *) data);
 }
 
-__host__ void construir_resultado(const Imagen imagen_original, Imagen &resultado, PixelU8 *data_resultado) {
+__host__ void construir_resultado(const Imagen &imagen_original, Imagen &resultado, const PixelU8 *data_resultado) {
     resultado.size = imagen_original.size;
     resultado.alto = imagen_original.alto;
     resultado.ancho = imagen_original.ancho;
@@ -269,9 +269,11 @@ void detectar_bordes(PixelU8 *entrada, unsigned char *salida, const int size, co
     cudaMalloc((void **) &filtrada, sizeof(PixelU8) * size);
     double **mascara = construir_mascara_filtrado(config.tamaño_mascara);
     const int radio = config.tamaño_mascara / 2;
-    int lado_tile = (DIMENSION_TILE + 2*radio);
-    int tile_size = lado_tile * lado_tile * sizeof(PixelU8);
-    filtrar<<<M, N, tile_size>>>(entrada, filtrada, mascara, radio, ancho, size, lado_tile, tile_size);
+
+    const int lado_tile = (DIMENSION_TILE + 2*radio);
+    const int tile_size = lado_tile * lado_tile;
+
+    filtrar<<<M, N, tile_size * sizeof(PixelU8)>>>(entrada, filtrada, mascara, config.tamaño_mascara,  ancho, size, lado_tile, tile_size);
 
     log_tiempo_etapa("[Detección de Bordes] Resaltado");
     resaltar(filtrada, size, ancho);
@@ -284,25 +286,72 @@ void detectar_bordes(PixelU8 *entrada, unsigned char *salida, const int size, co
     cudaFree(mascara);
 }
 
-__global__ void filtrar(const PixelU8 *entrada, PixelU8 *filtrada, double ** mascara, int radio, int ancho, int size, int lado_tile, int tile_size) {
-    extern __shared__ PixelU8 smem[];
-    const unsigned int thread_id_global = blockDim.x * blockIdx.x + threadIdx.x;
-    const unsigned int cantidad_threads_global = gridDim.x * blockDim.x;
+__device__ void construir_tile(const PixelU8 *data, const int ancho_data, const int size_data,PixelU8 *tile, const int lado_tile, const int tile_size, const int radio, const int indice_primer_elemento) {
+    for (int i = threadIdx.x; i < tile_size; i+= blockDim.x) {
+        const int n_fila_tile = i / lado_tile;
+        const unsigned int offset_fila = (n_fila_tile - radio) * ancho_data;
+        const int n_columna_tile = i % lado_tile;
+        const unsigned int offset_columna = n_columna_tile - radio;
+
+        const int indice = indice_primer_elemento + offset_columna + offset_fila;
+        const int n_fila_primer_elemento = indice_primer_elemento / ancho_data;
+
+        if (const int n_fila_indice = indice / ancho_data; indice < 0 || indice >= size_data || (n_fila_indice - n_fila_primer_elemento + radio) != n_fila_tile) {
+            tile[i].r = 0;
+            tile[i].g = 0;
+            tile[i].b = 0;
+
+            continue;
+        }
+
+        tile[i].r = data[indice].r;
+        tile[i].g = data[indice].g;
+        tile[i].b = data[indice].b;
+    }
+}
+
+__global__ void filtrar(const PixelU8 *entrada, PixelU8 *filtrada, double **mascara, const int tamaño_mascara, const int ancho, const int size, const int lado_tile, const int tile_size) {
+    extern __shared__ PixelU8 tile_shared[];
+    const int alto = size / ancho;
+    const int radio = tamaño_mascara / 2;
+    const int lado_tile_util = lado_tile - 2 * radio;
+    const int tile_size_util = lado_tile_util * lado_tile_util;
+    const int tiles_eje_x = ceil((double) ancho / lado_tile_util);
+    const int tiles_eje_y = ceil((double) alto / lado_tile_util);
+
     const unsigned int thread_id_local = threadIdx.x;
     const unsigned int cantidad_threads_local = blockDim.x;
 
-    const int lado_tile_util = lado_tile - 2*radio;
-    const int tile_size_util = lado_tile_util * lado_tile_util;
+    for (int i = blockIdx.x; i < tiles_eje_x * tiles_eje_y; i += gridDim.x ) {
+        const int coordinada_bloque_x = (i % tiles_eje_x) * lado_tile_util;
+        const int coordenada_bloque_y = (i / tiles_eje_x) * lado_tile_util;
 
-    for (int i = thread_id_local; i < tile_size_util; i+= cantidad_threads_local) {
-        const int coordenada_x = (i % lado_tile_util) + radio;
-        const int coordenada_y = (i / lado_tile_util) + radio;
-        const int indice_pixel = coordenada_y * lado_tile + coordenada_x;
+        const int indice_primer_elemento = coordenada_bloque_y * ancho + coordinada_bloque_x;
 
-        const PixelS16 valor = aplicar_mascara(smem, indice_pixel, config.tamaño_mascara, mascara, 1.0 / (config.tamaño_mascara * config.tamaño_mascara), DIMENSION_TILE, tile_size);
-        filtrada[i].r = (unsigned char) valor.r;
-        filtrada[i].g = (unsigned char) valor.g;
-        filtrada[i].b = (unsigned char) valor.b;
+        construir_tile(entrada, ancho, size, tile_shared, lado_tile, tile_size, radio, indice_primer_elemento);
+
+        __syncthreads();
+
+        for (int j = thread_id_local; j < tile_size_util; j += cantidad_threads_local) {
+            const int coordenada_x = (j % lado_tile_util) + radio;
+            const int coordenada_y = (j / lado_tile_util) + radio;
+            const int indice_pixel = coordenada_y * lado_tile + coordenada_x;
+
+            const PixelS16 valor = aplicar_mascara(tile_shared, indice_pixel, tamaño_mascara, mascara,
+                                                   1.0 / (tamaño_mascara * tamaño_mascara), lado_tile,
+                                                   tile_size);
+
+            const int x_global = coordinada_bloque_x + (j % lado_tile_util);
+            const int y_global = coordenada_bloque_y + (j / lado_tile_util);
+
+            if (x_global < ancho && y_global < alto) {
+                const int idx_global = y_global * ancho + x_global;
+                filtrada[idx_global].r = (unsigned char) valor.r;
+                filtrada[idx_global].g = (unsigned char) valor.g;
+                filtrada[idx_global].b = (unsigned char) valor.b;
+            }
+        }
+        __syncthreads();
     }
 }
 
@@ -497,7 +546,7 @@ double **construir_mascara_sobel(enum tipo_sobel tipo) {
     return mascara;
 }
 
-__global__ void umbralizar(PixelU8 *entrada, unsigned char *salida, int size) {
+__global__ void umbralizar(const PixelU8 *entrada, unsigned char *salida, int size) {
     const unsigned int thread_id_global = blockDim.x * blockIdx.x + threadIdx.x;
     const unsigned int cantidad_threads = gridDim.x * blockDim.x;
 
